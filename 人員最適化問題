@@ -1,0 +1,136 @@
+import pandas as pd
+from amplify import (
+    BinaryPoly,
+    Solver,
+    SymbolGenerator,
+    sum_poly,
+)
+from amplify.client import FixstarsClient
+from amplify.constraint import greater_equal, one_hot, equal_to
+from itertools import product
+
+# 各店舗の必要人数の設定
+dict_req = dict(location=["tenjin", "hakata"], employee=[2, 3])
+
+# 各従業員の勤務可能店舗の設定
+dict_worker_loc = dict(
+    worker_id=[0, 1, 2, 3, 4],
+    tenjin=[2, 2, 0, 1, 0],
+    hakata=[1, 1, 1, 1, 0]
+)
+
+df_req = pd.DataFrame.from_dict(dict_req, orient="index").T
+print("各店舗の従業員必要人数")
+display(df_req.style.hide_index())
+
+df_worker_loc = pd.DataFrame.from_dict(dict_worker_loc, orient="index").T
+print("各従業員の勤務可能店舗")
+display(df_worker_loc.style.hide_index())
+
+# 各種変数の定義
+workers = df_worker_loc["worker_id"].values
+locations = df_req["location"].values
+
+num_workers = len(workers)
+num_locations = len(locations)
+
+# dictの作成
+idx2loc = dict((i, v) for i, v in enumerate(df_req["location"].values))
+loc2idx = dict((v, i) for i, v in enumerate(df_req["location"].values))
+
+gen = SymbolGenerator(BinaryPoly)
+location_variables = gen.array(num_workers, num_locations)
+
+for i, l in product(range(num_workers), range(num_locations)):
+    worker_req = df_worker_loc.loc[i][1:]
+    if worker_req.eq(0):
+        location_variables[i, loc2idx[l]] = BinaryPoly(0)
+
+# 従業員充足率
+w = location_variables.sum(axis=0) - df_req["employee"].values
+
+# 充足率の平均
+average_fill_rate_cost = -((w.sum() / w.size) ** 2)
+
+# 充足率の分散
+variance_fill_rate_cost = ((w + w.sum()) / w.size) ** 2
+
+# 従業員の通勤距離のコスト
+location_cost = sum_poly(
+    num_workers,
+    lambda i: sum_poly(
+        num_locations,
+        lambda l: df_worker_loc.loc[i][idx2loc[l]] * location_variables[i, l],
+    ),
+)
+
+# 各従業員は同時に1店舗のみ勤務できる
+location_constraints = sum(one_hot(location_variables[i]) for i in range(num_workers))
+
+# 店舗の合計人数は要求人数以上
+require_constraints = sum(
+    greater_equal(location_variables[:, i].sum(), df_req["employee"][i])
+    for i in range(num_locations)
+)
+
+# 目的関数の構築
+loc_priority = 1
+ave_fill_priority = 1
+var_fill_priority = 10
+
+cost_func = (
+    loc_priority * location_cost
+    + ave_fill_priority * average_fill_rate_cost
+    + var_fill_priority * variance_fill_rate_cost
+)
+
+# 制約条件を重み付きペナルティ関数に変換
+constraint_weight = 10
+constraints = constraint_weight * (location_constraints + require_constraints)
+
+# 最終モデル
+model = cost_func + constraints
+
+# イジングマシンの設定
+client = FixstarsClient()
+client.token = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+client.parameters.timeout = 1000
+
+# ソルバーを定義して実行
+solver = Solver(client)
+results = solver.solve(model)
+
+# 制約条件を満たさない場合は例外
+if len(results) == 0:
+    raise RuntimeError("The given constraints are not satisfied")
+
+# 計算結果
+values = results[0].values
+energy = results[0].energy
+
+# 勤務地に関する変数の復号
+location_solutions = location_variables.decode(values)
+
+# 勤務地に変換
+result_worker_id, result_location = location_solutions.nonzero()
+dict_df = {
+    "worker_id": result_worker_id,
+    "location": [idx2loc[i] for i in result_location],
+}
+
+df_result = pd.DataFrame.from_dict(dict_df, orient="index").T
+print("勤務地の割り当て結果")
+display(df_result.style.hide_index())
+
+# 各店舗の従業員カウント
+num_member = df_result["location"].value_counts()
+
+# 従業員充足率表を作成
+fill_rate = df_req.copy()
+fill_rate["fill_rate"] = [
+    num_member[idx2loc[i]] / df_req.loc[i]["employee"] for i in range(num_locations)
+]
+
+# 従業員充足率の結果出力
+print("各店舗の従業員必要人数と充足率の結果")
+display(fill_rate.style.hide_index())
