@@ -2,7 +2,7 @@ from amplify import Poly, sum, solve, FixstarsClient
 import pandas as pd
 
 # -------------------------------
-# データ定義（変更なし）
+# データ定義
 # -------------------------------
 dict_req = dict(location=["tenjin", "hakata"], employee=[2, 3])
 dict_worker_loc = dict(
@@ -30,45 +30,58 @@ num_locations = len(locations)
 # -------------------------------
 # バイナリ変数 (worker × location)
 # -------------------------------
-x = [[Poly(0) for _ in range(num_locations)] for _ in range(num_workers)]
+x = [[Poly() for _ in range(num_locations)] for _ in range(num_workers)]
 
-# 勤務不可能な場所は 0 に固定
+# -------------------------------
+# 目的関数・制約
+# -------------------------------
+model = Poly(0)
+
+# 勤務不可な場所はペナルティで 0 に固定
 for i in range(num_workers):
     for l in range(num_locations):
-        loc_name = locations[l]
-        if df_worker_loc.loc[i][loc_name] == 0:
-            x[i][l] = Poly(0)
+        if df_worker_loc.loc[i, locations[l]] == 0:
+            model += 10 * x[i][l]**2  # 強制0ペナルティ
 
-# -------------------------------
-# 各店舗の割り当て人数（ペナルティ方式）
-# -------------------------------
+# 各店舗の割り当て人数
 assigned = [sum([x[i][l] for i in range(num_workers)]) for l in range(num_locations)]
 
-# 可能人数を超えないよう制約ペナルティ
-req_constraints = sum([(assigned[l] - min(df_req.loc[l]["employee"], sum([1 if df_worker_loc.loc[i, locations[l]] > 0 else 0 for i in range(num_workers)])))**2 for l in range(num_locations)])
+# 店舗ごとの勤務可能人数（上限）
+max_possible = [
+    sum([1 if df_worker_loc.loc[i, locations[l]] > 0 else 0 for i in range(num_workers)])
+    for l in range(num_locations)
+]
+
+# 必要人数制約（ペナルティ方式）
+req_constraints = sum([
+    (assigned[l] - min(df_req.loc[l]["employee"], max_possible[l]))**2
+    for l in range(num_locations)
+])
 
 # 各従業員は 1 店舗のみ勤務（ペナルティ）
-one_hot_constraints = sum([(sum([x[i][l] for l in range(num_locations)]) - 1)**2 for i in range(num_workers)])
+one_hot_constraints = sum([
+    (sum([x[i][l] for l in range(num_locations)]) - 1)**2
+    for i in range(num_workers)
+])
 
-# -------------------------------
 # 通勤コスト
-# -------------------------------
-location_cost = sum([df_worker_loc.loc[i][locations[l]] * x[i][l] for i in range(num_workers) for l in range(num_locations)])
+location_cost = sum([
+    df_worker_loc.loc[i, locations[l]] * x[i][l]
+    for i in range(num_workers) for l in range(num_locations)
+])
 
-# -------------------------------
-# 目的関数
-# -------------------------------
+# 目的関数に制約重みを加える
 constraint_weight = 10
-model = location_cost + constraint_weight * (req_constraints + one_hot_constraints)
+model += location_cost + constraint_weight * (req_constraints + one_hot_constraints)
 
 # -------------------------------
-# Fixstars Amplify v1.4.x 用
+# Fixstars Amplify 用
 # -------------------------------
 client = FixstarsClient()
-client.token = "YOUR_TOKEN_HERE"  # ← 自分の token に置き換えてください
+client.token = "YOUR_TOKEN_HERE"  # ← 必ず自分の token に置き換える
 client.parameters.timeout = 1000
 
-# solve() の結果
+# solve() の実行
 result_list = solve(model, client=client)
 if len(result_list) == 0:
     raise RuntimeError("No valid solution found")
@@ -81,9 +94,11 @@ solution = result_list[0]  # Solution オブジェクト
 solution_matrix = [[0]*num_locations for _ in range(num_workers)]
 for i in range(num_workers):
     for l in range(num_locations):
-        solution_matrix[i][l] = solution[x[i][l]]  # Poly変数をキーに取得
+        solution_matrix[i][l] = solution.values[x[i][l]]  # 安全にアクセス可能
 
+# -------------------------------
 # 勤務地の割り当て結果
+# -------------------------------
 worker_id = []
 loc_name_list = []
 for i in range(num_workers):
@@ -96,7 +111,9 @@ df_result = pd.DataFrame({"worker_id": worker_id, "location": loc_name_list})
 print("\n■ 勤務地の割り当て結果")
 print(df_result)
 
+# -------------------------------
 # 店舗ごとの人数カウントと充足率
+# -------------------------------
 num_member = df_result["location"].value_counts()
 fill_rate = df_req.copy()
 fill_rate["assigned"] = [num_member.get(loc, 0) for loc in locations]
