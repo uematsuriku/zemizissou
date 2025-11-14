@@ -1,28 +1,97 @@
-# ----------------------------------------------------
-# 修正箇所: sum_poly を sum に変更
-# ----------------------------------------------------
-from amplify import solve, Poly, sum, FixstarsClient # sum_poly は不要になり、sum() を使用
+from amplify import solve, Poly, sum, FixstarsClient
 import pandas as pd
 from amplify import VariableGenerator
 from datetime import timedelta
+from typing import Dict, List, Tuple
 
 # -------------------------------
-# データ定義
+# データの入力関数
 # -------------------------------
-dict_req = dict(location=["tenjin", "hakata"], employee=[2, 3])
-dict_worker_loc = dict(
-    worker_id=[0, 1, 2, 3, 4],
-    tenjin=[2, 2, 0, 1, 0],
-    hakata=[1, 1, 1, 1, 0]
-)
+def input_optimization_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """ユーザーから従業員の必要人数と勤務可能店舗の情報を入力として受け付ける関数"""
+    
+    print("--- 1. 各店舗の従業員必要人数を入力 ---")
+    location_names = input("店舗名をカンマ区切りで入力してください (例: tenjin, hakata): ").split(',')
+    location_names = [name.strip() for name in location_names if name.strip()]
 
-df_req = pd.DataFrame(dict_req)
-df_worker_loc = pd.DataFrame(dict_worker_loc)
+    employee_counts = []
+    for loc in location_names:
+        while True:
+            try:
+                count = int(input(f"店舗 '{loc}' の必要人数を入力してください: "))
+                employee_counts.append(count)
+                break
+            except ValueError:
+                print("⚠️ 無効な入力です。整数で入力してください。")
+    
+    df_req = pd.DataFrame({
+        "location": location_names,
+        "employee": employee_counts
+    })
+    
+    print("\n--- 2. 各従業員の勤務可能店舗を入力 (0: 不可, 1以上: 勤務可能度) ---")
+    worker_data = {"worker_id": []}
+    for loc in location_names:
+        worker_data[loc] = []
+        
+    worker_id_counter = 0
+    while True:
+        try:
+            worker_id = input(f"従業員IDを入力してください (デフォルト: {worker_id_counter}, 終了する場合は 'q' を入力): ")
+            if worker_id.lower() == 'q':
+                break
+            
+            if not worker_id:
+                worker_id = worker_id_counter
+            else:
+                worker_id = int(worker_id)
+            
+            worker_data["worker_id"].append(worker_id)
+            
+            for loc in location_names:
+                while True:
+                    try:
+                        score = int(input(f"従業員 {worker_id} は店舗 '{loc}' に勤務可能ですか？ (0=不可, 1=可(低コスト), 2=可(高コスト)など、整数で入力): "))
+                        worker_data[loc].append(score)
+                        break
+                    except ValueError:
+                        print("⚠️ スコアは整数で入力してください。")
+                        
+            worker_id_counter = int(worker_id) + 1
 
+        except ValueError:
+            print("⚠️ 無効な従業員IDです。整数で入力してください。")
+        except Exception as e:
+            print(f"予期せぬエラー: {e}")
+            break
+
+    df_worker_loc = pd.DataFrame(worker_data)
+    
+    return df_req, df_worker_loc
+
+# -------------------------------
+# メイン処理の開始
+# -------------------------------
+# データの読み込みまたは入力
+try:
+    df_req, df_worker_loc = input_optimization_data()
+except Exception as e:
+    print(f"データ入力中にエラーが発生しました。スクリプトを終了します: {e}")
+    exit()
+
+if df_worker_loc.empty:
+    print("従業員データが入力されませんでした。処理を終了します。")
+    exit()
+
+print("\n" + "="*40)
+print("■ 確定したデータ")
+print("="*40)
 print("■ 各店舗の従業員必要人数")
 print(df_req)
 print("\n■ 各従業員の勤務可能店舗")
 print(df_worker_loc)
+print("="*40)
+
 
 # -------------------------------
 # 基本情報
@@ -44,41 +113,42 @@ x = gen.array('Binary', num_workers, num_locations)
 model = Poly(0) 
 
 # ペナルティ項の重み
-PENALTY_UNASSIGNABLE = 100 
-constraint_weight = 10     
+PENALTY_UNASSIGNABLE = 100  # 勤務不可な場所への割り当てに対する強いペナルティ
+constraint_weight = 10      # その他の主要な制約ペナルティ (最適化の難易度に応じて調整が必要)
 
-# 1. 勤務不可な場所はペナルティで 0 に固定
+# 1. 勤務不可な場所はペナルティで 0 に固定 (スコアが 0 の場所)
 for i in range(num_workers):
     for l in range(num_locations):
+        # df_worker_loc の列名は locations[l]
         if df_worker_loc.loc[i, locations[l]] == 0:
             model += PENALTY_UNASSIGNABLE * x[i][l]
 
 # 各店舗の割り当て人数
-# **修正**: sum_poly を sum に変更
 assigned = [sum([x[i][l] for i in range(num_workers)]) for l in range(num_locations)]
 
 # 店舗ごとの勤務可能人数（上限）
+# 勤務可能スコアが 1 以上の従業員数を数える
 max_possible = [
     sum([1 if df_worker_loc.loc[i, locations[l]] > 0 else 0 for i in range(num_workers)])
     for l in range(num_locations)
 ]
 
 # 2. 必要人数制約（ペナルティ方式）
-# **修正**: sum_poly を sum に変更
+# 目標人数 = min(必要人数, 勤務可能人数)
 req_constraints = sum([
     (assigned[l] - min(df_req.loc[l]["employee"], max_possible[l]))**2
     for l in range(num_locations)
 ])
 
 # 3. 各従業員は 1 店舗のみ勤務（ペナルティ）
-# **修正**: sum_poly を sum に変更
 one_hot_constraints = sum([
     (sum([x[i][l] for l in range(num_locations)]) - 1)**2
     for i in range(num_workers)
 ])
 
 # 4. 通勤コスト（最小化）
-# **修正**: sum_poly を sum に変更
+# df_worker_loc のスコアをコストとして使用 (スコアが高いほどコストが高くなる想定)
+# (注: スコアが「勤務可否」を示す場合、このコスト項は「スコアが高い場所への割り当てを避ける」ように作用します)
 location_cost = sum([
     df_worker_loc.loc[i, locations[l]] * x[i][l]
     for i in range(num_workers) for l in range(num_locations)
@@ -88,44 +158,34 @@ location_cost = sum([
 model += location_cost + constraint_weight * (req_constraints + one_hot_constraints)
 
 # -------------------------------
-# Fixstars Amplify 用
+# Fixstars Amplify 用 (実行にはトークンが必要)
 # -------------------------------
 client = FixstarsClient()
-client.token = "YOUR_TOKEN_HERE"  # ← 必ず自分の token に置き換える
-client.parameters.timeout = timedelta(seconds=10)
+client.token = "YOUR_TOKEN_HERE"  # ★★★ ここに必ず自分のトークンを記述してください ★★★
+client.parameters.timeout = timedelta(seconds=300)
 
-# solve() の実行
+print("\n" + "="*40)
+print(f"Fixstars Amplify Solver に接続を試行します。TIMEOUT: {client.parameters.timeout.total_seconds()}秒")
+print("="*40)
+
+# solve() の実行 (ダミーを削除し、実際の solve を使用)
 try:
-    # 実際の solve 実行部分はコメントアウト
-    # result_list = solve(model, client=client)
-    # solution = result_list[0]
+    # 実際の solve 実行
+    result_list = solve(model, client=client)
     
-    # ダミー結果のセットアップ
-    class DummySolution:
-        def __init__(self, x_vars):
-            self._values = {} # _values を private に設定
-            for i in range(len(x_vars)):
-                for l in range(len(x_vars[0])):
-                    self._values[x_vars[i][l]] = 0 
-            # ダミー割り当て例
-            self._values[x_vars[0][0]] = 1 # worker 0 -> tenjin
-            self._values[x_vars[1][1]] = 1 # worker 1 -> hakata
-            self._values[x_vars[2][1]] = 1 # worker 2 -> hakata
-            self._values[x_vars[3][1]] = 1 # worker 3 -> hakata
-            
-        @property
-        def values(self):
-            return self._values
+    if not result_list:
+        raise RuntimeError("ソルバーから有効な解が得られませんでした。")
 
-    solution = DummySolution(x)
-    print("\n**注意: solveが実行されなかったため、ダミー結果を使用します。**")
+    solution = result_list[0]
+    print(f"✓ 最低エネルギーの解を発見しました。エネルギー: {solution.energy}")
     
+except RuntimeError as re:
+    print(f"⚠️ 実行エラー: {re}")
+    exit()
 except Exception as e:
-    print(f"\nエラーが発生しました。トークンまたは接続を確認してください: {e}")
-    raise RuntimeError("No valid solution found")
+    print(f"⚠️ 接続または実行中に予期せぬエラーが発生しました。トークンや接続を確認してください: {e}")
+    exit()
 
-if solution is None:
-    raise RuntimeError("No valid solution found")
 
 # -------------------------------
 # 結果の復元
@@ -133,6 +193,7 @@ if solution is None:
 solution_matrix = [[0]*num_locations for _ in range(num_workers)]
 for i in range(num_workers):
     for l in range(num_locations):
+        # solution.valuesから値を取得
         solution_matrix[i][l] = solution.values[x[i][l]]
 
 # -------------------------------
@@ -147,15 +208,25 @@ for i in range(num_workers):
             loc_name_list.append(locations[l])
 
 df_result = pd.DataFrame({"worker_id": worker_id, "location": loc_name_list})
-print("\n■ 勤務地の割り当て結果")
-print(df_result)
+
+print("\n" + "="*40)
+print("✨ 最適化された勤務地の割り当て結果")
+print("="*40)
+if df_result.empty:
+    print("解が見つかりましたが、割り当てられた従業員はいませんでした。制約がきつすぎる可能性があります。")
+else:
+    print(df_result)
 
 # -------------------------------
 # 店舗ごとの人数カウントと充足率
 # -------------------------------
 num_member = df_result["location"].value_counts()
 fill_rate = df_req.copy()
-fill_rate["assigned"] = [num_member.get(loc, 0) for loc in locations]
+
+# 結果に存在しない店舗（割り当てが0人）は 0 で補完
+assigned_counts = [num_member.get(loc, 0) for loc in locations]
+
+fill_rate["assigned"] = assigned_counts
 fill_rate["fill_rate"] = fill_rate["assigned"] / fill_rate["employee"]
 
 print("\n■ 各店舗の必要人数と充足率")
